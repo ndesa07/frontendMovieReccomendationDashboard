@@ -1,25 +1,74 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useEffectEvent, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 const API_BASE = "http://127.0.0.1:8000";
+const MODEL_OPTIONS = [
+  { value: "heuristic", label: "Heuristic" },
+  { value: "pagerank", label: "PageRank" },
+  { value: "node2vec", label: "Node2Vec" },
+] as const;
+
+type RecommendationModel = (typeof MODEL_OPTIONS)[number]["value"];
+
+type Movie = {
+  movie_id: number;
+  title: string;
+  poster?: string | null;
+  predicted_rating?: number | null;
+  score?: number | null;
+};
+
+type MoviesResponse = {
+  movies: Movie[];
+};
+
+type SearchResponse = {
+  results: Movie[];
+};
+
+type RecommendationsResponse = {
+  recommendations?: Movie[];
+};
 
 export default function Dashboard() {
-  const [movies, setMovies] = useState<any[]>([]);
-  const [filteredMovies, setFilteredMovies] = useState<any[]>([]);
+  const [displayedMovies, setDisplayedMovies] = useState<Movie[]>([]);
   const [search, setSearch] = useState("");
 
   const [page, setPage] = useState(1);
   const [selectedMovies, setSelectedMovies] = useState<number[]>([]);
-  const [recommendations, setRecommendations] = useState<any[]>([]);
+  const [recommendations, setRecommendations] = useState<Movie[]>([]);
+  const [selectedModel, setSelectedModel] =
+    useState<RecommendationModel>("heuristic");
 
   const LIMIT = 25;
 
   // =========================
-  // FETCH MOVIES
+  // 🔥 SORT FUNCTION (SELECTED ON TOP)
+  // =========================
+  const sortMovies = (moviesList: Movie[], selected: number[]) => {
+    return [...moviesList].sort((a, b) => {
+      const aSelected = selected.includes(a.movie_id);
+      const bSelected = selected.includes(b.movie_id);
+
+      if (aSelected && !bSelected) return -1;
+      if (!aSelected && bSelected) return 1;
+      return 0;
+    });
+  };
+
+  // =========================
+  // FETCH PAGINATED MOVIES
   // =========================
   const fetchMovies = async (pageNumber: number) => {
     const offset = (pageNumber - 1) * LIMIT;
@@ -27,47 +76,80 @@ export default function Dashboard() {
     const res = await fetch(
       `${API_BASE}/movies?limit=${LIMIT}&offset=${offset}`
     );
-    const data = await res.json();
+    const data: MoviesResponse = await res.json();
 
-    setMovies(data.movies);
-    setFilteredMovies(data.movies);
+    setDisplayedMovies(sortMovies(data.movies, selectedMovies));
   };
 
-  useEffect(() => {
-    fetchMovies(page);
-  }, [page]);
+  // =========================
+  // SEARCH MOVIES (FULL DB)
+  // =========================
+  const searchMovies = async (query: string) => {
+    if (!query) {
+      await fetchMovies(page);
+      return;
+    }
+
+    const res = await fetch(
+      `${API_BASE}/search?query=${encodeURIComponent(query)}&limit=50&offset=0`
+    );
+
+    const data: SearchResponse = await res.json();
+    setDisplayedMovies(sortMovies(data.results, selectedMovies));
+  };
+
+  const loadMoviesForPage = useEffectEvent((pageNumber: number) => {
+    void fetchMovies(pageNumber);
+  });
+
+  const runMovieSearch = useEffectEvent((query: string) => {
+    void searchMovies(query);
+  });
 
   // =========================
-  // SEARCH FILTER
+  // EFFECTS
   // =========================
   useEffect(() => {
     if (!search) {
-      setFilteredMovies(movies);
-    } else {
-      setFilteredMovies(
-        movies.filter((m) =>
-          m.title.toLowerCase().includes(search.toLowerCase())
-        )
-      );
+      const timeoutId = window.setTimeout(() => {
+        loadMoviesForPage(page);
+      }, 0);
+
+      return () => window.clearTimeout(timeoutId);
     }
-  }, [search, movies]);
+  }, [page, search]);
+
+  // Debounced search
+  useEffect(() => {
+    const delay = setTimeout(() => {
+      runMovieSearch(search);
+    }, 300);
+
+    return () => clearTimeout(delay);
+  }, [search]);
 
   // =========================
   // TOGGLE MOVIE SELECT
   // =========================
   const toggleMovie = (id: number) => {
-    setSelectedMovies((prev) =>
-      prev.includes(id)
+    setSelectedMovies((prev) => {
+      const updated = prev.includes(id)
         ? prev.filter((m) => m !== id)
-        : [...prev, id]
-    );
+        : [...prev, id];
+
+      // 🔥 Reorder immediately
+      console.log("Toggling movie:", id, "Selected movies:", updated);
+      setDisplayedMovies((current) => sortMovies(current, updated));
+
+      return updated;
+    });
   };
 
   // =========================
   // FETCH RECOMMENDATIONS
   // =========================
   const fetchRecommendations = async () => {
-    const res = await fetch(`${API_BASE}/recommend/new`, {
+    const res = await fetch(`${API_BASE}/recommend/new/${selectedModel}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -75,7 +157,7 @@ export default function Dashboard() {
       body: JSON.stringify({ movies: selectedMovies }),
     });
 
-    const data = await res.json();
+    const data: RecommendationsResponse = await res.json();
     setRecommendations(data.recommendations || []);
   };
 
@@ -91,12 +173,15 @@ export default function Dashboard() {
         <Input
           placeholder="Search movies..."
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => {
+            setSearch(e.target.value);
+            setPage(1);
+          }}
         />
 
         {/* MOVIE LIST */}
         <div className="space-y-2 max-h-[500px] overflow-y-auto pr-2">
-          {filteredMovies.map((m) => (
+          {displayedMovies.map((m) => (
             <Button
               key={m.movie_id}
               variant={
@@ -119,23 +204,46 @@ export default function Dashboard() {
           ))}
         </div>
 
-        {/* PAGINATION */}
-        <div className="flex gap-2 items-center">
-          <Button
-            disabled={page === 1}
-            onClick={() => setPage((p) => p - 1)}
-          >
-            Previous
-          </Button>
+        {/* PAGINATION (ONLY WHEN NOT SEARCHING) */}
+        {!search && (
+          <div className="flex gap-2 items-center">
+            <Button
+              disabled={page === 1}
+              onClick={() => setPage((p) => p - 1)}
+            >
+              Previous
+            </Button>
 
-          <span className="text-sm">Page {page}</span>
+            <span className="text-sm">Page {page}</span>
 
-          <Button onClick={() => setPage((p) => p + 1)}>
-            Next
-          </Button>
-        </div>
+            <Button onClick={() => setPage((p) => p + 1)}>
+              Next
+            </Button>
+          </div>
+        )}
 
         {/* ACTION */}
+        <div className="space-y-2">
+          <p className="text-sm font-medium">Recommendation Model</p>
+          <Select
+            value={selectedModel}
+            onValueChange={(value) =>
+              setSelectedModel(value as RecommendationModel)
+            }
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder="Select a model" />
+            </SelectTrigger>
+            <SelectContent>
+              {MODEL_OPTIONS.map((model) => (
+                <SelectItem key={model.value} value={model.value}>
+                  {model.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
         <Button
           className="w-full"
           onClick={fetchRecommendations}
@@ -171,9 +279,17 @@ export default function Dashboard() {
                     {m.title}
                   </p>
 
-                  <Badge className="mt-2">
-                    ⭐ {m.predicted_rating}
-                  </Badge>
+                  {m.predicted_rating && (
+                    <Badge className="mt-2">
+                      ⭐ {m.predicted_rating}
+                    </Badge>
+                  )}
+
+                  {m.score && (
+                    <Badge className="mt-2">
+                      Match: {m.score}
+                    </Badge>
+                  )}
                 </div>
               </div>
             ))}
